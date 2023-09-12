@@ -1,4 +1,8 @@
 # mmapped pytorch tensors
+# Because https://github.com/pytorch/pytorch/issues/64932
+#         [RFC] TorchStore - A Shared-Memory Tensor Store 64932
+# while lovely, and the need is real, may never get done
+# Perhaps this is ugly and useful enough to create the motivation
 
 import ctypes
 import io
@@ -11,22 +15,33 @@ import torch
 
 from collections import defaultdict
 from dataclasses import dataclass
+from typing import Union, Tuple, List, cast
 from warnings import warn
 
 #tensors_start = 1<<16
 
 r"""
+What is the effect of this string?
 
 """
 
 
 @dataclass
 class MemoryMapping:
+    """The data specifying a memory mapping.
+    
+    This is not used.
+    """
     mm: mmap.mmap
     start_in_file: int
     end_in_file: int
 
 class MMTT():
+    """
+    Another docstring
+    """
+    TensorSizeType = Union[int, torch.Size, List[int], Tuple[int, ...]]
+
     def __init__(self, name, tensors_start=1<<16):
         logging.debug(f"MMTT init name {name} tensors_start {tensors_start}")
         self.name = name
@@ -56,6 +71,8 @@ class MMTT():
         #self.save_metadata()
 
     def open(self):
+        """Make the MMTT instance ready to provide tensors.
+        """
         # Open the file unbuffered binary read-write and keep it.
         try:
             self.file = open(self.name, 'r+b', buffering=0)
@@ -100,7 +117,28 @@ class MMTT():
         self.close()
         
     
-    def get(self, name):
+    def get(self, name: str) -> torch.Tensor:
+        """
+        Get an existing tensor by name.
+    
+        Multiple copies in one or more processes can be had, all sharing the same storage.
+    
+        Parameters
+        ----------
+        name
+            The name given to the tensor when it was created.
+    
+        Returns
+        -------
+            A tensor of the same shape and dtype, and sharing the same storage,
+            as the tensor created with ``name``.
+    
+        Raises
+        ------
+        KeyError
+            If no tensor of ``name`` has been created.
+        """
+        
         # If the file has grown, the metadata may have changed
         if self.last_size_seen != os.fstat(self.file.fileno()).st_size:
             self.load_metadata()
@@ -126,7 +164,19 @@ class MMTT():
         rv["dtype"] = eval(d["dtype_str"])
         return rv
 
-    def _create_mmapped_buffer(self, n_bytes):
+    def _create_mmapped_buffer(self, n_bytes: int) -> Tuple[mmap.mmap, int, int]:
+        """Create a ``mmap``ped buffer
+
+        Parameters
+        ----------
+        n_bytes
+            The required size of the buffer in bytes.
+    
+        Returns
+        -------
+            A tuple of the ``mmap``, the offset within the ``mmap``, and the start position in the file.
+        """
+         
         # First version: just grow the file and make a bespoke map every time
         start_in_file = self.file_size() # New buffer will start in new section of file
         logging.debug(f"self.file_size() {self.file_size()}")
@@ -143,17 +193,54 @@ class MMTT():
                                                   start_in_file=start_in_file,
                                                   end_in_file=start_in_file+new_space_length ))
         return mm, map_offset, start_in_file
+
+
+    def zeros(self, name: str, *size_args: TensorSizeType, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+        """Returns a tensor filled with the scalar value 0, with the shape defined by the variable argument size.
+
+        **FIXME:** use a default tensor type https://pytorch.org/docs/stable/generated/torch.set_default_tensor_type.html#torch.set_default_tensor_type
+        
+        Parameters
+        ----------
+        name
+            The name to give to this new tensor.
+
+        size_args
+            The size of the tensor to create.
+
+        dtype
+            The data dype of the tensor elements.
     
-    def zeros(self, name, *size, dtype=torch.float32):
-        # Find the size of the tensor
-        if size == () or size == (0,):
+        Returns
+        -------
+            A tensor filled with the scalar value 0, with the shape defined by the variable argument size.
+    
+        Raises
+        ------
+        TypeError
+            If the type of size_args is wrong.
+
+        """
+        if not size_args or size_args == (0,):
             return torch.zeros(0, dtype=dtype) # Has no content
-        if isinstance(size[0], torch.Size):
-            size = list(size[0])
-        if isinstance(size[0], (list, tuple)):
-            size = size[0]
+        
+        # Find the size of the tensor
+        size_input = size_args[0]
+    
+        # Handle torch.Size
+        if isinstance(size_input, torch.Size):
+            size_list = list(size_input)
+        # Handle list or tuple
+        elif isinstance(size_input, (list, tuple)):
+            size_list = list(size_input)
+        # Handle multiple int arguments
+        elif all(isinstance(v, int) for v in size_args):
+            size_list = cast(List[int], list(size_args))
+        else:
+            raise TypeError(f"Unsupported type for size_args: {type(size_input)}")
+    
         count = 1
-        for i in size:
+        for i in size_list:
             count *= i
         element_size = torch.tensor([], dtype=dtype).element_size()
         n_bytes = count * element_size
@@ -161,10 +248,10 @@ class MMTT():
 
         # Make the tensor that uses the new space
         t = torch.frombuffer(mm, dtype=dtype, count=count, offset=map_offset)
-        t = t.view(*size)
+        t = t.view(*size_list)
 
         # Remember name and where
-        d = {"size": size,
+        d = {"size": size_list,
              "count": count,
              "start_in_file": start_in_file,
              "dtype_str": str(dtype),

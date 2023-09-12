@@ -67,6 +67,12 @@ def test_make_empty_zero(opened_mt):
     assert isinstance(t, torch.Tensor)
     assert torch.equal(t, torch.zeros(0))
 
+def test_make_empty_zero_2(opened_mt):
+    mt = opened_mt
+    t = mt.zeros('t')
+    assert isinstance(t, torch.Tensor)
+    assert torch.equal(t, torch.zeros(0))
+
 def test_make_simple_zeros(opened_mt):
     mt = opened_mt
     t = mt.zeros('t', 1)
